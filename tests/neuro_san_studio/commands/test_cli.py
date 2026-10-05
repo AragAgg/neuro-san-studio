@@ -16,13 +16,17 @@
 
 """Tests for the Typer CLI dispatcher and `main()` entry point."""
 
+import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from pytest import MonkeyPatch
 
+from neuro_san_studio.agent_network_consultant.consultant_options import ConsultantOptions
+from neuro_san_studio.agent_network_consultant.network_test_environment import NetworkTestEnvironment
 from neuro_san_studio.commands import cli as cli_module
 from neuro_san_studio.commands import import_networks as import_networks_module
 from neuro_san_studio.commands import init as init_module
@@ -224,6 +228,69 @@ class TestMainEntryPoint:
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 1
+
+    def test_main_with_consultant_forwards_typed_options(self, monkeypatch: MonkeyPatch) -> None:
+        """The Consultant command should pass every typed option to an isolated replacement process."""
+        child_environment = {"CHILD_ENVIRONMENT": "configured"}
+        create = Mock(return_value=child_environment)
+        owned_thinking_directory = Mock(return_value="/tmp/consultant-thinking")
+        execve = Mock()
+        monkeypatch.setattr(NetworkTestEnvironment, "create", create)
+        monkeypatch.setattr(NetworkTestEnvironment, "owned_thinking_directory", owned_thinking_directory)
+        monkeypatch.setattr(cli_module.os, "execve", execve)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "neuro-san-studio",
+                "consultant",
+                "--hocon-file",
+                "basic/example.hocon",
+                "--direction",
+                "Preserve behavior",
+                "--test-level",
+                "max",
+                "--test-guidance",
+                "routing",
+                "--force-generate",
+                "--ungrounded",
+                "continue",
+                "--only-fixtures",
+                "first.hocon",
+                "second.hocon",
+                "--max-iterations",
+                "4",
+                "--success-ratio",
+                "2/3",
+            ],
+        )
+
+        main()
+
+        create.assert_called_once_with()
+        execve.assert_called_once()
+        executable, command, environment = execve.call_args.args
+        payload = json.loads(command[-1])
+        received_options = ConsultantOptions(**payload.get("options", {}))
+        assert executable == sys.executable
+        assert command[:3] == [
+            sys.executable,
+            "-m",
+            "neuro_san_studio.agent_network_consultant.network_consultant_orchestrator",
+        ]
+        assert environment == child_environment
+        assert payload.get("owned_thinking_directory") == "/tmp/consultant-thinking"
+        assert received_options == ConsultantOptions(
+            hocon_file="basic/example.hocon",
+            direction="Preserve behavior",
+            test_level="max",
+            test_guidance="routing",
+            force_generate=True,
+            ungrounded="continue",
+            only_fixtures=["first.hocon", "second.hocon"],
+            max_iterations=4,
+            success_ratio="2/3",
+        )
 
     def test_main_propagates_runner_exceptions(self, monkeypatch: MonkeyPatch) -> None:
         """Exceptions from NeuroSanRunner().run() should bubble up to the caller."""

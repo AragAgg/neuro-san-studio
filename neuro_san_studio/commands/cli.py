@@ -16,9 +16,11 @@
 
 """Typer CLI dispatcher for the neuro-san-studio package."""
 
+import json
 import os
 import sys
 from typing import List
+from typing import Literal
 from typing import Optional
 
 import typer
@@ -292,6 +294,140 @@ class NeuroSanStudioCli:  # pylint: disable=too-few-public-methods
                 list_agents=list_agents,
                 extra_args=extra,
             ).run()
+        )
+
+    @staticmethod
+    def _run_consultant(options: dict[str, object]) -> None:
+        """
+        Load Consultant only when requested and run it with the parsed CLI options.
+
+        :param options: The validated Typer option values forwarded to Consultant.
+        :raises typer.BadParameter: If Consultant rejects an option value or combination.
+        """
+        # Consultant has a large dependency graph. Load it only for this command so unrelated
+        # `ns` commands and their help paths stay lightweight.
+        # pylint: disable-next=import-outside-toplevel
+        from neuro_san_studio.agent_network_consultant.consultant_options import ConsultantOptions
+
+        # pylint: disable-next=import-outside-toplevel
+        from neuro_san_studio.agent_network_consultant.network_test_environment import NetworkTestEnvironment
+
+        try:
+            consultant_options = ConsultantOptions(**options)
+            consultant_options.validate()
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+        environment_scope = NetworkTestEnvironment()
+        child_environment = environment_scope.create()
+        serialized_run = json.dumps(
+            {
+                "options": consultant_options._asdict(),
+                "owned_thinking_directory": environment_scope.owned_thinking_directory(),
+            }
+        )
+        command = [
+            sys.executable,
+            "-m",
+            "neuro_san_studio.agent_network_consultant.network_consultant_orchestrator",
+            serialized_run,
+        ]
+        try:
+            # Replacing the CLI process preserves signal and terminal behavior while keeping project defaults out of
+            # the caller's environment. The new process receives only the explicit copied mapping above.
+            os.execve(sys.executable, command, child_environment)
+        except OSError:
+            NetworkTestEnvironment.cleanup_owned_thinking_directory(environment_scope.owned_thinking_directory())
+            raise
+
+    @staticmethod
+    @app.command(
+        "consultant",
+        help="Generate tests and iteratively improve an agent network without changing its intended behavior.",
+        context_settings={"allow_extra_args": True},
+    )
+    def _consultant_command(  # pylint: disable=too-many-arguments
+        ctx: typer.Context,
+        *,
+        use_case: str | None = typer.Option(None, "--use-case", help="Use-case description for a new network."),
+        hocon_file: str | None = typer.Option(
+            None,
+            "--hocon-file",
+            help="Existing network HOCON, relative to registries/, to improve.",
+        ),
+        direction: str | None = typer.Option(
+            None,
+            "--direction",
+            help="Optional intended behavior or improvement direction for an existing network.",
+        ),
+        test_level: Literal["minimum", "normal", "max"] = typer.Option(
+            "normal",
+            "--test-level",
+            help="Coverage level for generated tests.",
+        ),
+        test_guidance: str = typer.Option(
+            "",
+            "--test-guidance",
+            help="Free-text guidance about what the test generator should cover.",
+        ),
+        force_generate: bool = typer.Option(
+            False,
+            "--force-generate",
+            help="Generate tests even when fixtures already exist; existing files are never deleted.",
+        ),
+        ungrounded: Literal["stop", "continue"] = typer.Option(
+            "stop",
+            "--ungrounded",
+            help="Stop for unsatisfied data requirements, or remove those criteria and continue.",
+        ),
+        only_fixtures: list[str] | None = typer.Option(
+            None,
+            "--only-fixtures",
+            help="Run only a space-separated list of exact fixture filenames, including .hocon.",
+        ),
+        max_iterations: int = typer.Option(
+            20,
+            "--max-iterations",
+            help="Maximum number of test-and-repair iterations; zero runs tests without repairs.",
+        ),
+        success_ratio: str = typer.Option(
+            "3/3",
+            "--success-ratio",
+            help="Verification ratio, in N/M form, used for fixes the Consultant considers stable.",
+        ),
+    ) -> None:
+        """Run Network Consultant with Studio's shared Typer command dispatcher.
+
+        :param ctx: The Click context carrying additional legacy fixture names.
+        :param use_case: The use case used to create a new network.
+        :param hocon_file: The existing registries-relative HOCON file to improve.
+        :param direction: The optional intended behavior or improvement direction for an existing network.
+        :param test_level: The coverage level requested from the test generator.
+        :param test_guidance: Additional test-generation focus.
+        :param force_generate: Whether to generate tests when fixtures already exist.
+        :param ungrounded: How to handle criteria unsupported by available tools.
+        :param only_fixtures: The optional fixture subset to run.
+        :param max_iterations: The maximum number of repair iterations.
+        :param success_ratio: The confidence verification ratio in N/M form.
+        """
+        if ctx.args and not only_fixtures:
+            raise typer.BadParameter("Unexpected argument. Fixture names must follow --only-fixtures.")
+        selected_fixtures = list(only_fixtures or [])
+        selected_fixtures.extend(ctx.args)
+
+        NeuroSanStudioCli._run_consultant(
+            {
+                "use_case": use_case,
+                "hocon_file": hocon_file,
+                "direction": direction,
+                "test_level": test_level,
+                "test_guidance": test_guidance,
+                "force_generate": force_generate,
+                "ungrounded": ungrounded,
+                "only_fixtures": selected_fixtures or None,
+                "max_iterations": max_iterations,
+                "success_ratio": success_ratio,
+            }
         )
 
     @staticmethod
