@@ -26,6 +26,8 @@ from unittest import TestCase
 from unittest.mock import Mock
 from unittest.mock import patch
 
+from pyhocon import ConfigFactory
+
 from middleware.agent_network_consultant.consultant_state import ConsultantState
 from neuro_san_studio.agent_network_consultant.consultant_workflow import ConsultantWorkflow
 from neuro_san_studio.agent_network_consultant.stuck_patch_error import StuckPatchError
@@ -119,6 +121,53 @@ class TestConsultantWorkflow(TestCase):
         self.assertIn("change neither the network nor the fixture", stop)
         self.assertNotIn("fixture_expectation_fixer", stop)
         self.assertIn("fixture_expectation_fixer", keep)
+
+    def test_consultant_registry_declares_ungrounded_and_the_fixer_exception(self) -> None:
+        """Keep the registry contract required by runner-side ungrounded reporting."""
+        consultant: str = Path("registries/agent_network_consultant.hocon").read_text(encoding="utf-8")
+        self.assertIn("UNGROUNDED:", consultant)
+        self.assertIn("`UNGROUNDED: <fixture>: <toolname>:", consultant)
+        self.assertIn("read_thinking_trace", consultant)
+        self.assertIn("2b. EXCEPTION", consultant)
+
+    def test_consultant_front_man_can_call_the_trace_reader(self) -> None:
+        """Expose every diagnostic tool named by the front man's instructions."""
+        path = Path("registries/agent_network_consultant.hocon")
+        config = ConfigFactory.parse_string(path.read_text(encoding="utf-8"), basedir=".", resolve=True)
+        tools: list[Any] = list(config.get("tools", []))
+        front_man: Any = tools[0]
+
+        self.assertIn("read_thinking_trace", front_man.get("tools", []))
+
+    def test_consultant_resolves_the_included_instruction_writer_nodes(self) -> None:
+        """Reuse the existing fan-out code with the Consultant-specific writing contract."""
+        path = Path("registries/agent_network_consultant.hocon")
+        config = ConfigFactory.parse_string(path.read_text(encoding="utf-8"), basedir=".", resolve=True)
+        names: list[str] = []
+        write_all_instructions: Any | None = None
+        instructions_writer: Any | None = None
+        for tool in config.get("tools", []):
+            name = tool.get("name", "")
+            names.append(name)
+            if name == "write_all_instructions":
+                write_all_instructions = tool
+            if name == "instructions_writer":
+                instructions_writer = tool
+
+        self.assertEqual(1, names.count("write_all_instructions"))
+        self.assertEqual(1, names.count("instructions_writer"))
+        self.assertIsNotNone(write_all_instructions)
+        self.assertEqual(
+            "coded_tools.agent_network_instructions_editor.write_all_instructions.WriteAllInstructions",
+            write_all_instructions.get("class", ""),
+        )
+        self.assertIsNotNone(instructions_writer)
+        instructions: str = instructions_writer.get("instructions", "")
+        self.assertIn("Goal:", instructions)
+        self.assertIn("ALWAYS edit incrementally", instructions)
+        middleware: list[Any] = list(instructions_writer.get("middleware", []))
+        self.assertIn("ConsultantDefinitionMiddleware", middleware[0].get("class", ""))
+        self.assertNotIn("agent_network_instruction_improver.hocon", path.read_text(encoding="utf-8"))
 
     def test_all_passing_consult_logs_the_stuck_patch_error_type(self) -> None:
         """Log an actionable exception type when an all-passing consultation cannot apply its patch."""
